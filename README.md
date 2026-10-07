@@ -9,7 +9,7 @@
 ![Categories](https://img.shields.io/badge/Categories-10_%2B_biased_flag-1F3864?style=for-the-badge)
 ![Sources](https://img.shields.io/badge/Sources-CrowS--Pairs_%7C_IndiBias_%7C_SBIC-2E5FD9?style=for-the-badge)
 ![CLI commands](https://img.shields.io/badge/CLI_commands-7-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-28_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-26_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -112,7 +112,7 @@ biasradar gives each of these questions its own component. Each component has te
 | Models | `tfidf` (core, scikit-learn) and `transformer` (extra `hf`, default encoder `microsoft/deberta-v3-base`) |
 | Offline mode | The TF-IDF detector, the demo and all core tests. No key, no download |
 | Safety | Independent sigmoid outputs, a saved label map, a disclaimer in each CLI and app output |
-| Tests | **28** pass with torch and transformers. In CI, **26** pass and **2** skip |
+| Tests | **28** unit tests (`pytest`). CI installs only `.[dev]`: **26** pass and **2** skip (`hf` extra). With the `hf` extra: 28 pass |
 
 ```mermaid
 flowchart LR
@@ -495,8 +495,8 @@ Planned milestones (not built):
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests with torch and transformers (local) | **28 passed** | `pytest -q` |
-| Unit tests in a clean venv with `pip install -e ".[dev]"` (as in CI) | **26 passed, 2 skipped** | `pytest -q` |
+| Unit tests (CI installs only `.[dev]`) | **26 passed, 2 skipped** (the 2 transformer tests) | `pytest -q` |
+| Unit tests with the `hf` extra | **28 passed** | `pytest -q` |
 
 **SYNTHETIC demo** (835 rows: train 596, val 119, test 120, TF-IDF detector):
 
