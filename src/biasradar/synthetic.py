@@ -27,7 +27,7 @@ TRAITS = ["lazy", "bad with money", "always late", "too emotional", "not smart",
 BIASED_TEMPLATES = [
     "All {g} people are {t}.",
     "You know {g} people, they are {t}.",
-    "Of course he failed, {g} people are {t}.",
+    "No wonder he failed, {g} people are {t}.",
     "Never hire {g} people because they are {t}.",
     "{G} people are just {t}, everyone knows it.",
     "Typical. The {g} ones are {t} again.",
@@ -39,7 +39,7 @@ NEUTRAL_TEMPLATES = [
     "The survey asked {g} participants about their commute.",
     "Our {g} colleague organised the team lunch on Friday.",
     "The {g} people at the event were tired after the long day.",
-    "Some {g} students said the exam was too long.",
+    "Some {g} runners said the race was too long.",
 ]
 EVERYDAY = [
     "The train to the city leaves at nine in the morning.", "Please send the report before the weekend.",

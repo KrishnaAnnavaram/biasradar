@@ -502,7 +502,7 @@ Planned milestones (not built):
 
 | Metric (test) | Value |
 |---|---|
-| Biased head ROC-AUC / PR-AUC | 0.916 / 0.951 |
+| Biased head ROC-AUC / PR-AUC | 0.916 / 0.952 |
 | Biased head F1 at threshold 0.40 | 0.976 |
 | Neutral false-alarm rate | 0.111 |
 | Biased head ECE | 0.057 |
