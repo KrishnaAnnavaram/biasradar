@@ -73,6 +73,7 @@ This README is the **one location that explains all of biasradar**. It gives the
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one text](#42-the-life-cycle-of-one-text)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The taxonomy and the label map](#5-the-taxonomy-and-the-label-map)
 6. 🟢 [The source loaders](#6-the-source-loaders)
 7. 🟣 [The grouped splits](#7-the-grouped-splits)
@@ -141,6 +142,48 @@ flowchart LR
 | CLI | `src/biasradar/cli.py` | The `biasradar` command with 7 subcommands |
 | App | `src/biasradar/app/streamlit_app.py` | Cached model, label map from the artefact |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    CLI["cli.py<br/>7 subcommands"]
+    APP["app/streamlit_app.py<br/>get_model, st.cache_resource"]
+    CFG["config.py<br/>load_dotenv, Settings"]
+    subgraph DATAIN["Data"]
+        SRC["sources.py<br/>load_crows_pairs, load_indibias,<br/>load_sbic, load_neutral, combine"]
+        SYN["synthetic.py<br/>make_corpus"]
+        TAX["taxonomy.py<br/>normalise_category, LabelMap"]
+        SPL["splits.py<br/>make_splits, coverage"]
+    end
+    subgraph MODELS["Detectors"]
+        MOD["model.py<br/>TfidfBiasModel, load_model"]
+        TRF["transformer.py<br/>TransformerBiasModel, extra hf"]
+        MET["metrics.py<br/>tune_thresholds, reports"]
+    end
+    EVA["evaluate.py<br/>evaluate, format_summary"]
+    EXP["explain.py<br/>predict_text, top_terms"]
+    CARD["card.py<br/>write_card"]
+
+    CLI --> CFG
+    CLI --> SRC
+    CLI --> SYN
+    CLI --> SPL
+    CLI --> MOD
+    CLI -. "--model transformer" .-> TRF
+    CLI --> EVA
+    CLI --> EXP
+    CLI --> CARD
+    CLI -- "app" --> APP
+    APP --> MOD
+    APP --> EXP
+    SRC --> TAX
+    MOD --> TAX
+    MOD --> MET
+    MOD -. "kind transformer" .-> TRF
+    TRF --> MET
+    EVA --> MET
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -191,6 +234,18 @@ The transformer heads return logits. `masked_losses` uses `binary_cross_entropy_
 ### 3.5 Unknown labels are masked, not guessed
 An anti-stereotype row has no `is_biased` value, so it trains only the category head. An SBIC post that is biased but has no mapped category does not train the category head.
 
+```mermaid
+flowchart LR
+    ST[/"Stereotype row<br/>is_biased 1, a category"/] --> BH["Biased head"]
+    ST --> CH["Category head"]
+    AS[/"Anti-stereotype row<br/>is_biased empty, a category"/] --> CH
+    AS -. "masked" .-> BH
+    NE[/"Neutral row<br/>is_biased 0, no category"/] --> BH
+    NE -- "negative for each category" --> CH
+    SB[/"Biased SBIC post<br/>with no mapped category"/] --> BH
+    SB -. "masked" .-> CH
+```
+
 ### 3.6 Splits keep groups and sources balanced
 `make_splits` uses `StratifiedGroupKFold` on (source, biased flag, first category). Each group stays in one split, and `coverage` shows the rows of each category in each split.
 
@@ -215,23 +270,59 @@ An anti-stereotype row has no `is_biased` value, so it trains only the category 
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    C["CrowS-Pairs"] --> N["normalise_category"]
-    I["IndiBias"] --> N
-    S["SBIC annotations"] --> AGG["aggregate_sbic: one row for each post"] --> N
-    NE["Neutral CSV"] --> U
+flowchart TD
+    C[/"CrowS-Pairs CSV"/] --> N["normalise_category"]
+    I[/"IndiBias CSV"/] --> N
+    S[/"SBIC annotation CSVs"/] --> AGG["aggregate_sbic:<br/>one row for each post"]
+    NE[/"Neutral CSV"/] --> U
     N --> U["combine: unified frame"]
+    AGG --> U
     U --> SP["make_splits: grouped, stratified"]
-    SP --> TR["train"] --> FIT["Fit biased head and category head"]
-    SP --> VA["val"] --> TH["Tune thresholds"]
+    SY[/"make_corpus: SYNTHETIC"/] --> SP
+    SP --> FILE[("Unified CSV<br/>with a split column")]
+    FILE -- "train" --> FIT["Fit the biased head<br/>and the category head"]
+    FILE -- "val" --> TH["Tune the thresholds"]
     FIT --> TH
-    TH --> SAVE["Save model + label_map.json + thresholds.json"]
-    SP --> TE["test"] --> EV["evaluate: overall and by source"]
-    SAVE --> EV --> CARD["model_card.md"]
-    SAVE --> PRED["predict / app"]
+    TH --> SAVE[("Model folder: model,<br/>label_map.json, thresholds.json")]
+    FILE -- "test" --> EV["evaluate: overall,<br/>by source, worst errors"]
+    SAVE --> EV
+    EV --> REP[("test_report.json,<br/>model_card.md")]
+    TXT[/"Text"/] --> PRED["predict or app"]
+    SAVE --> PRED
+    PRED --> OUT[/"p(biased), categories,<br/>disclaimer"/]
+    OUT --> HUMAN{{"HUMAN<br/>a person reviews<br/>each result"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one text
+
+```mermaid
+stateDiagram-v2
+    state "No saved model" as NoModel
+    state "Model folder loaded" as Loaded
+    state "Raw text" as Raw
+    state "TF-IDF features" as Tfidf
+    state "Tokens, maximum 128" as Tokens
+    state "Two probability outputs" as Proba
+    state "Flagged as biased" as Flagged
+    state "Not flagged" as NotFlagged
+    state "Output with disclaimer" as Out
+    [*] --> NoModel: no thresholds.json, FileNotFoundError
+    [*] --> Loaded: load_model reads the kind and label_map.json
+    Loaded --> Raw: predict or the app gets a text
+    Raw --> Tfidf: kind tfidf
+    Raw --> Tokens: kind transformer
+    Tfidf --> Proba: logistic-regression heads
+    Tokens --> Proba: encoder, two heads, sigmoid
+    Proba --> Flagged: p_biased at or above the saved threshold
+    Proba --> NotFlagged: p_biased below the saved threshold
+    Flagged --> Out: categories sorted by p, each with its flag
+    NotFlagged --> Out: categories sorted by p, each with its flag
+    Out --> [*]
+    NoModel --> [*]
+```
 
 1. The CLI or the app loads the model folder once.
 2. The detector changes the text into features (TF-IDF) or tokens (transformer, maximum 128).
@@ -240,11 +331,57 @@ flowchart TB
 5. The output lists `p(biased)`, the flag, and the categories sorted by probability, with names from `label_map.json`.
 6. The output ends with the disclaimer.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor OP as Reviewer
+    participant CLI as biasradar CLI
+    participant SPL as sources.py and splits.py
+    participant MOD as TfidfBiasModel
+    participant MET as metrics.py
+    participant EVA as evaluate.py and card.py
+    participant FS as Model folder
+
+    OP->>CLI: biasradar prepare --crows --indibias --sbic --out data/unified.csv
+    CLI->>SPL: load each source, combine, make_splits
+    SPL-->>CLI: unified frame with a split column
+    CLI-->>OP: rows for each source and split, coverage warning
+    OP->>CLI: biasradar train --data data/unified.csv
+    CLI->>MOD: fit(train, val)
+    MOD->>MET: tune_biased_threshold, tune_thresholds on val
+    CLI->>FS: save model.joblib, label_map.json, thresholds.json
+    CLI->>EVA: evaluate(model, test)
+    EVA-->>CLI: report
+    CLI->>FS: test_report.json, write_card model_card.md
+    CLI-->>OP: format_summary
+    OP->>CLI: biasradar predict TEXT --explain
+    CLI->>FS: load_model
+    CLI->>MOD: predict_text, top_terms
+    CLI-->>OP: p(biased), categories, terms, disclaimer
+```
+
 ---
 
 ## 5. The taxonomy and the label map
 
 **Purpose.** Give each source the same 10 categories with one spelling.
+
+```mermaid
+flowchart LR
+    RAW[/"Category text<br/>from a source"/] --> LOW["Strip, lower case"]
+    LOW --> AL{"In ALIASES?"}
+    AL -- "yes" --> MAP["Replace with<br/>the alias target"]
+    AL -- "no" --> CHK{"In the 10 CATEGORIES?"}
+    MAP --> CHK
+    CHK -- "no" --> ERR[/"UnknownCategory"/]
+    CHK -- "yes" --> OK[/"One spelling,<br/>for example religion"/]
+    LM["LabelMap: categories,<br/>version 1.0"] --> SAVE[("label_map.json<br/>next to the model")]
+    SAVE --> LOAD{"LabelMap.load:<br/>repeated category?"}
+    LOAD -- "yes" --> ERR2[/"ValueError"/]
+    LOAD -- "no" --> NAMES[/"Category names for<br/>the CLI and the app"/]
+```
 
 | Category | Typical source |
 |---|---|
@@ -272,6 +409,24 @@ flowchart TB
 
 **Purpose.** Change each source into the unified frame.
 
+```mermaid
+flowchart LR
+    CR[/"CrowS-Pairs: sent_more,<br/>bias_type, stereo_antistereo"/] --> PA["_pairs"]
+    IB[/"IndiBias: modified_eng_sent_more,<br/>bias_type, stereo_antistereo"/] --> PA
+    PA --> POL{"stereo_antistereo"}
+    POL -- "stereo" --> B1["is_biased 1"]
+    POL -- "antistereo" --> B0["is_biased empty"]
+    POL -- "other value" --> ERR[/"SourceError"/]
+    B1 --> NC["normalise_category<br/>on bias_type"]
+    B0 --> NC
+    SB[/"SBIC CSV files"/] --> AG["aggregate_sbic"]
+    NT[/"Neutral CSV: text"/] --> NR["is_biased 0,<br/>no category"]
+    NC --> CO["combine: drop empty texts,<br/>drop duplicates in one source"]
+    AG --> CO
+    NR --> CO
+    CO --> OUT[/"Unified frame: text, source, group_id,<br/>is_biased, categories, polarity"/]
+```
+
 | Column | Meaning |
 |---|---|
 | `text` | The sentence or post |
@@ -282,6 +437,25 @@ flowchart TB
 | `polarity` | `stereo`, `antistereo`, `offensive` or `neutral` |
 
 **Procedure (SBIC)**
+
+```mermaid
+flowchart TD
+    IN[/"SBIC annotation rows"/] --> KEEP["Keep post, offensiveYN,<br/>targetCategory"]
+    KEEP --> DROP["Drop the rows with no post"]
+    DROP --> GRP["Group the rows by post"]
+    GRP --> MEAN{"Mean offensiveYN"}
+    MEAN -- "0.5 or more" --> BIA["is_biased 1,<br/>polarity offensive"]
+    MEAN -- "below 0.5" --> NEU["is_biased 0,<br/>polarity neutral"]
+    MEAN -- "no value" --> UNK["is_biased empty"]
+    BIA --> VOTE["Count the mapped targetCategory votes:<br/>race, gender, disabled, body"]
+    VOTE --> MV{"Votes at least<br/>min_votes?"}
+    MV -- "yes" --> KC["Keep the category"]
+    MV -- "no" --> NOC["No category"]
+    KC --> OUT[/"One row for each post,<br/>group_id sbic:i"/]
+    NOC --> OUT
+    NEU --> OUT
+    UNK --> OUT
+```
 
 1. Keep only `post`, `offensiveYN` and `targetCategory`. Drop rows without a post.
 2. Group the annotation rows by post.
@@ -298,6 +472,21 @@ flowchart TB
 ## 7. The grouped splits
 
 **Purpose.** Score each category and each source on rows that the model did not see.
+
+```mermaid
+flowchart TD
+    IN[/"Unified frame"/] --> FR{"Fractions from<br/>0.05 to 0.4?"}
+    FR -- "no" --> ERR[/"ValueError"/]
+    FR -- "yes" --> ST["strata: source, biased flag b, n or u,<br/>first category"]
+    ST --> RARE["Strata with fewer than 10 rows<br/>become one rare stratum of the source"]
+    RARE --> TE["StratifiedGroupKFold by group_id:<br/>first held-out fold is test, about 15 %"]
+    TE --> VA["Same method on the rest, seed + 1:<br/>validation, about 15 % of all rows"]
+    VA --> TR["Other rows: train"]
+    TR --> LEAK{"A group in two splits?"}
+    LEAK -- "yes" --> SLE[/"SplitLeakError"/]
+    LEAK -- "no" --> OUT[/"Frame with a split column"/]
+    OUT --> COV["coverage: rows of each<br/>category in each split"]
+```
 
 **Procedure**
 
@@ -317,6 +506,26 @@ flowchart TB
 
 **Purpose.** Give a fast, offline detector with the same outputs as the transformer.
 
+```mermaid
+flowchart TD
+    TR[/"Train rows"/] --> VEC["FeatureUnion: word TF-IDF 1-2 grams<br/>+ char_wb TF-IDF 3-5 grams"]
+    VEC --> BR["Rows with a known is_biased"]
+    BR --> TWO{"Two classes?"}
+    TWO -- "no" --> CONST["Store a constant,<br/>biased_head_trained false"]
+    TWO -- "yes" --> LRB["LogisticRegression C 4,<br/>class_weight balanced"]
+    VEC --> CRW["category_rows: a category,<br/>or is_biased 0"]
+    CRW --> EACH["For each of the 10 categories"]
+    EACH --> VAR{"Positive and<br/>negative rows?"}
+    VAR -- "no" --> CC["Constant probability"]
+    VAR -- "yes" --> LRC["LogisticRegression,<br/>one-vs-rest"]
+    VAL[/"Val rows"/] --> TH["Tune the thresholds,<br/>section 10"]
+    LRB --> TH
+    CONST --> TH
+    LRC --> TH
+    CC --> TH
+    TH --> SAVE[/"model.joblib, label_map.json,<br/>thresholds.json"/]
+```
+
 | Part | Setting |
 |---|---|
 | Word features | `TfidfVectorizer`, 1–2 grams, sublinear TF |
@@ -335,6 +544,25 @@ flowchart TB
 
 **Purpose.** Give a stronger detector with the same interface (`pip install biasradar[hf]`).
 
+```mermaid
+flowchart TD
+    IN[/"Train and val rows"/] --> SEED["set_seed, load the tokenizer<br/>and the encoder"]
+    SEED --> HEADS["MultiTaskModel: dropout on the first token,<br/>biased head 1 logit, category head 10 logits"]
+    HEADS --> PW["pos_weight = negatives / positives,<br/>at most 50"]
+    PW --> EP["Epoch: shuffled batches of 16"]
+    EP --> LOSS["masked_losses: BCE with logits,<br/>known labels only, sum of the two heads"]
+    LOSS --> OPT["AdamW step,<br/>lr 2e-5, weight decay 0.01"]
+    OPT --> VF["Validation macro F1<br/>at threshold 0.5"]
+    VF --> BEST{"New best?"}
+    BEST -- "yes" --> CK[("best.pt in _ckpt")]
+    BEST -- "no" --> MORE{"More epochs?<br/>default 3"}
+    CK --> MORE
+    MORE -- "yes" --> EP
+    MORE -- "no" --> RL["Load best.pt"]
+    RL --> TH["Tune the thresholds on val"]
+    TH --> SAVE[/"encoder/, heads.pt,<br/>label_map.json, thresholds.json"/]
+```
+
 **Procedure**
 
 1. Load the tokenizer and the encoder (`BIASRADAR_ENCODER`, default `microsoft/deberta-v3-base`).
@@ -351,6 +579,20 @@ flowchart TB
 ## 10. Evaluation and thresholds
 
 **Purpose.** Show which categories and which sources work.
+
+```mermaid
+flowchart TD
+    IN[/"Saved model and one split"/] --> PP["predict_proba:<br/>p_biased, category probabilities"]
+    PP --> BRE["biased_report on rows with a known is_biased:<br/>ROC-AUC, PR-AUC, F1, ECE,<br/>neutral false alarms, trained flag"]
+    PP --> CRE["category_report on category rows:<br/>P, R, F1, support, PR-AUC"]
+    CRE --> MM["micro_macro F1"]
+    PP --> BYS["For each source:<br/>biased_report, micro and macro F1"]
+    PP --> WE["10 worst biased errors"]
+    BRE --> REP[/"Report dict, format_summary"/]
+    MM --> REP
+    BYS --> REP
+    WE --> REP
+```
 
 | Metric | Head | Note |
 |---|---|---|
@@ -369,9 +611,36 @@ flowchart TB
 - Among thresholds with the same F1, the code selects the one nearest to 0.5.
 - A category with no validation rows keeps the threshold 0.5.
 
+```mermaid
+flowchart LR
+    VAL[/"Val probabilities<br/>and labels"/] --> PRES{"Positive rows in val?<br/>biased head: two classes"}
+    PRES -- "no" --> D05[/"Threshold 0.5"/]
+    PRES -- "yes" --> GRID["Grid 0.05 to 0.95,<br/>19 values"]
+    GRID --> F1["F1 at each threshold"]
+    F1 --> TIE["Best F1, ties:<br/>nearest to 0.5"]
+    TIE --> OUT[/"thresholds.json"/]
+    D05 --> OUT
+```
+
 ---
 
 ## 11. Explanations, the model card and the app
+
+**Purpose.** Show each prediction with its scores and terms, and write the model card.
+
+```mermaid
+flowchart LR
+    TXT[/"Text"/] --> PT["predict_text: p_biased, flag,<br/>categories sorted by p"]
+    PT --> FP["format_prediction: top 5,<br/>note that scores do not sum to 1"]
+    TXT --> TT{"kind tfidf and<br/>biased head trained?"}
+    TT -- "yes" --> TOP["top_terms: n-grams that raise<br/>the biased logit"]
+    TT -- "no" --> NONE["No terms"]
+    REP[/"Test report"/] --> WC["write_card: date, sources,<br/>SYNTHETIC mark, metrics, limits"]
+    WC --> CARD[("model_card.md")]
+    MD[("BIASRADAR_MODEL_DIR")] --> APP["Streamlit app:<br/>get_model with st.cache_resource"]
+    APP --> PT
+    APP --> TT
+```
 
 | Part | What it does |
 |---|---|
@@ -384,6 +653,24 @@ flowchart TB
 ---
 
 ## 12. The CLI
+
+**Purpose.** Give one command for each step, with one error rule for all commands.
+
+```mermaid
+flowchart TD
+    ARGS[/"biasradar command and options"/] --> ENV["load_dotenv of --env-file,<br/>default .env"]
+    ENV --> SET["Settings.from_env"]
+    SET --> CMD{"Command"}
+    CMD -- "synth" --> C1["make_corpus, make_splits,<br/>write the CSV"]
+    CMD -- "prepare" --> C2["Load the sources, combine,<br/>make_splits, coverage warning"]
+    CMD -- "train" --> C3["fit, save, evaluate on test,<br/>test_report.json, write_card"]
+    CMD -- "evaluate" --> C4["load_model,<br/>evaluate one split"]
+    CMD -- "predict" --> C5["load_model, predict_text,<br/>top_terms, DISCLAIMER"]
+    CMD -- "app" --> C6["streamlit run<br/>streamlit_app.py"]
+    CMD -- "demo" --> C7["SYNTHETIC corpus, TF-IDF,<br/>save and load in a temporary folder"]
+    SET -. "known error" .-> ERR[/"error: message,<br/>exit code 1"/]
+    CMD -. "known error" .-> ERR
+```
 
 | Command | What it does |
 |---|---|
@@ -459,17 +746,46 @@ biasradar train --data data/unified.csv --model transformer --out artifacts/debe
 biasradar evaluate --data data/unified.csv --model-dir artifacts/deberta --split test
 ```
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> DEMO["biasradar demo<br/>writes no files"]
+    INS --> SY["biasradar synth"]
+    SY --> SF[("data/synthetic.csv")]
+    SRC[("CrowS-Pairs, IndiBias,<br/>SBIC, neutral CSVs")] --> PR["biasradar prepare"]
+    PR --> UF[("data/unified.csv")]
+    SF --> TR["biasradar train"]
+    UF --> TR
+    TR --> MD[("artifacts/model")]
+    MD --> EV["biasradar evaluate"]
+    UF --> EV
+    MD --> PD["biasradar predict"]
+    MD --> AP["biasradar app<br/>extra app"]
+```
+
 ### 14.4 Environment variables
 
 | Variable | Used by | Meaning |
 |---|---|---|
-| `BIASRADAR_DATA_DIR` | Settings | Data folder. Default `data` |
+| `BIASRADAR_DATA_DIR` | Settings | Data folder. Default `data`. No command reads this value |
 | `BIASRADAR_MODEL_DIR` | `train`, `evaluate`, `predict`, app | Model folder. Default `artifacts/model` |
-| `BIASRADAR_SEED` | Splits, models | Seed. Default 42 |
+| `BIASRADAR_SEED` | Splits of `prepare` and `demo`, models | Seed. Default 42. The `synth` command uses its own `--seed` option (default 0) |
 | `BIASRADAR_ENCODER` | Transformer | Hugging Face encoder id. Default `microsoft/deberta-v3-base` |
 | `HF_HOME` | transformers | Cache folder for downloaded weights |
 
 biasradar uses no credentials. Keep local settings in `.env`. Git ignores this file.
+
+```mermaid
+flowchart LR
+    ENVF[/".env file<br/>or --env-file"/] --> LD["load_dotenv: sets only absent,<br/>non-empty variables"]
+    PENV[/"Process environment"/] --> FE["Settings.from_env"]
+    LD --> FE
+    FE --> CHK{"BIASRADAR_SEED<br/>an integer?"}
+    CHK -- "yes" --> SET[/"Settings: data_dir, model_dir,<br/>seed, encoder"/]
+    CHK -- "no" --> ERR[/"ConfigError: error:<br/>and exit code 1"/]
+    PENV -. "HF_HOME" .-> HF["transformers<br/>download cache"]
+```
 
 ---
 
